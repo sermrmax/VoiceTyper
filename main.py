@@ -1,52 +1,72 @@
+from __future__ import annotations
+
 import threading
 import tkinter as tk
 from tkinter import messagebox
+from typing import Optional
 
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 
 
+# Настройки записи
 SAMPLE_RATE = 16_000
 CHANNELS = 1
+
+# Настройки распознавания
 MODEL_SIZE = "base"
 LANGUAGE = "ru"
 
 
 class VoiceTyperApp:
     def __init__(self) -> None:
+        # -----------------------------
+        # Главное окно
+        # -----------------------------
         self.root = tk.Tk()
-
         self.root.title("Voice Typer")
-        self.root.geometry("440x390")
+        self.root.geometry("440x400")
         self.root.resizable(False, False)
         self.root.configure(bg="#15171c")
 
+        # -----------------------------
         # Состояние приложения
+        # -----------------------------
         self.is_recording = False
         self.is_processing = False
+        self.is_closing = False
 
-        # Работа с микрофоном
-        self.stream = None
-        self.audio_chunks = []
+        # Поток микрофона
+        self.stream: Optional[sd.InputStream] = None
 
-        # Модель распознавания
-        self.model = None
+        # Список фрагментов записанного звука
+        self.audio_chunks: list[np.ndarray] = []
 
+        # Модель Whisper
+        self.model: Optional[WhisperModel] = None
+
+        # Создаём интерфейс
         self.create_interface()
 
-        # Корректное закрытие приложения
-        self.root.protocol("WM_DELETE_WINDOW", self.close_app)
+        # Обработчик закрытия окна
+        self.root.protocol(
+            "WM_DELETE_WINDOW",
+            self.close_app,
+        )
 
-        # Загружаем модель в отдельном потоке
-        threading.Thread(
+        # Загружаем модель в отдельном потоке,
+        # чтобы окно приложения не зависало
+        model_thread = threading.Thread(
             target=self.load_model,
             daemon=True,
-        ).start()
+        )
+        model_thread.start()
 
     def create_interface(self) -> None:
-        """Создаёт интерфейс приложения."""
+        """Создаёт элементы интерфейса."""
 
+        # Заголовок приложения
         self.title_label = tk.Label(
             self.root,
             text="VOICE TYPER",
@@ -54,36 +74,60 @@ class VoiceTyperApp:
             bg="#15171c",
             fg="white",
         )
-        self.title_label.pack(pady=(25, 8))
+        self.title_label.pack(
+            pady=(25, 8),
+        )
 
+        # Подзаголовок
+        self.subtitle_label = tk.Label(
+            self.root,
+            text="Преобразование голоса в текст",
+            font=("Segoe UI", 10),
+            bg="#15171c",
+            fg="#737985",
+        )
+        self.subtitle_label.pack(
+            pady=(0, 10),
+        )
+
+        # Статус приложения
         self.status_label = tk.Label(
             self.root,
             text="Загрузка модели...",
             font=("Segoe UI", 11),
             bg="#15171c",
-            fg="#a5a9b3",
+            fg="#f0c75e",
         )
-        self.status_label.pack(pady=(0, 20))
+        self.status_label.pack(
+            pady=(0, 20),
+        )
 
+        # Кнопка записи
         self.record_button = tk.Button(
             self.root,
             text="Начать запись",
             command=self.toggle_recording,
+
+            # Пока модель загружается,
+            # кнопка выключена
             state=tk.DISABLED,
+
             font=("Segoe UI", 12, "bold"),
             bg="#3478f6",
             fg="white",
             activebackground="#2864d7",
             activeforeground="white",
-            disabledbackground="#3a3d44",
             disabledforeground="#777b85",
+
             relief="flat",
+            borderwidth=0,
             cursor="hand2",
             width=18,
             height=2,
         )
         self.record_button.pack()
 
+        # Подпись над текстовым полем
         self.result_label = tk.Label(
             self.root,
             text="Распознанный текст:",
@@ -97,6 +141,7 @@ class VoiceTyperApp:
             pady=(25, 5),
         )
 
+        # Поле для распознанного текста
         self.result_text = tk.Text(
             self.root,
             height=6,
@@ -105,38 +150,50 @@ class VoiceTyperApp:
             bg="#202329",
             fg="white",
             insertbackground="white",
+            selectbackground="#3478f6",
             relief="flat",
+            borderwidth=0,
             wrap="word",
             padx=10,
             pady=10,
         )
-        self.result_text.pack(padx=30)
+        self.result_text.pack(
+            padx=30,
+        )
 
     def load_model(self) -> None:
-        """Загружает Whisper-модель."""
+        """Загружает модель распознавания речи."""
 
         try:
+            print("Загрузка модели Whisper...")
+
             self.model = WhisperModel(
                 MODEL_SIZE,
                 device="cpu",
                 compute_type="int8",
             )
 
-            self.root.after(
-                0,
-                self.model_loaded,
-            )
+            print("Модель Whisper загружена")
+
+            # Интерфейс Tkinter нужно изменять
+            # только из главного потока
+            if not self.is_closing:
+                self.root.after(
+                    0,
+                    self.model_loaded,
+                )
 
         except Exception as error:
             error_text = str(error)
 
-            self.root.after(
-                0,
-                lambda: self.show_model_error(error_text),
-            )
+            if not self.is_closing:
+                self.root.after(
+                    0,
+                    lambda: self.show_model_error(error_text),
+                )
 
     def model_loaded(self) -> None:
-        """Вызывается после успешной загрузки модели."""
+        """Включает кнопку после загрузки модели."""
 
         self.status_label.configure(
             text="Готов к записи",
@@ -148,7 +205,7 @@ class VoiceTyperApp:
         )
 
     def show_model_error(self, error_text: str) -> None:
-        """Показывает ошибку загрузки модели."""
+        """Показывает ошибку загрузки Whisper."""
 
         self.status_label.configure(
             text="Ошибка загрузки модели",
@@ -157,32 +214,49 @@ class VoiceTyperApp:
 
         messagebox.showerror(
             "Ошибка модели",
-            error_text,
+            (
+                "Не удалось загрузить модель распознавания.\n\n"
+                f"{error_text}"
+            ),
         )
 
     def audio_callback(
         self,
-        indata,
-        frames,
+        indata: np.ndarray,
+        frames: int,
         time_info,
-        status,
+        status: sd.CallbackFlags,
     ) -> None:
-        """Получает фрагменты звука с микрофона."""
+        """
+        Получает небольшие фрагменты аудио.
+
+        Эта функция автоматически вызывается
+        библиотекой sounddevice во время записи.
+        """
 
         if status:
             print("Статус микрофона:", status)
 
-        self.audio_chunks.append(indata.copy())
+        # Обязательно создаём копию.
+        # Иначе sounddevice может перезаписать данные.
+        self.audio_chunks.append(
+            indata.copy(),
+        )
 
     def start_recording(self) -> None:
-        """Начинает запись."""
+        """Начинает запись с микрофона."""
 
         if self.model is None:
             return
 
-        try:
-            self.audio_chunks = []
+        if self.is_processing:
+            return
 
+        try:
+            # Очищаем предыдущую запись
+            self.audio_chunks.clear()
+
+            # Создаём входной аудиопоток
             self.stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 channels=CHANNELS,
@@ -190,9 +264,12 @@ class VoiceTyperApp:
                 callback=self.audio_callback,
             )
 
+            # Запускаем микрофон
             self.stream.start()
+
             self.is_recording = True
 
+            # Меняем внешний вид кнопки
             self.record_button.configure(
                 text="Остановить запись",
                 bg="#d94a4a",
@@ -204,10 +281,27 @@ class VoiceTyperApp:
                 fg="#ff7777",
             )
 
+            print("Запись началась")
+
         except Exception as error:
+            # Если поток успел создаться,
+            # пытаемся корректно его закрыть
+            if self.stream is not None:
+                try:
+                    self.stream.close()
+                except Exception:
+                    pass
+
+                self.stream = None
+
+            self.is_recording = False
+
             messagebox.showerror(
                 "Ошибка микрофона",
-                str(error),
+                (
+                    "Не удалось начать запись.\n\n"
+                    f"{error}"
+                ),
             )
 
     def stop_recording(self) -> None:
@@ -216,12 +310,18 @@ class VoiceTyperApp:
         if self.stream is None:
             return
 
-        self.stream.stop()
-        self.stream.close()
-        self.stream = None
+        try:
+            self.stream.stop()
+            self.stream.close()
 
-        self.is_recording = False
+        except Exception as error:
+            print("Ошибка остановки микрофона:", error)
 
+        finally:
+            self.stream = None
+            self.is_recording = False
+
+        # Возвращаем обычный вид кнопки
         self.record_button.configure(
             text="Начать запись",
             bg="#3478f6",
@@ -229,9 +329,10 @@ class VoiceTyperApp:
             state=tk.DISABLED,
         )
 
+        # Проверяем, записался ли звук
         if not self.audio_chunks:
             self.status_label.configure(
-                text="Звук не записан",
+                text="Звук не был записан",
                 fg="#ff7777",
             )
 
@@ -240,14 +341,39 @@ class VoiceTyperApp:
             )
             return
 
-        # Соединяем фрагменты записи
+        # Объединяем все части звука
+        # в один большой NumPy-массив
         audio = np.concatenate(
             self.audio_chunks,
             axis=0,
         )
 
-        # Whisper ожидает одномерный массив
-        audio = audio.reshape(-1).astype(np.float32)
+        # Очищаем фрагменты после объединения
+        self.audio_chunks.clear()
+
+        # Whisper ожидает одномерный массив:
+        # [0.1, 0.2, 0.3, ...]
+        audio = audio.reshape(-1)
+
+        # Гарантируем формат float32
+        audio = audio.astype(
+            np.float32,
+            copy=False,
+        )
+
+        # Проверяем, что запись не слишком короткая
+        minimum_samples = SAMPLE_RATE // 4
+
+        if audio.size < minimum_samples:
+            self.status_label.configure(
+                text="Запись слишком короткая",
+                fg="#ff7777",
+            )
+
+            self.record_button.configure(
+                state=tk.NORMAL,
+            )
+            return
 
         self.is_processing = True
 
@@ -256,59 +382,91 @@ class VoiceTyperApp:
             fg="#f0c75e",
         )
 
-        # Распознавание выполняется отдельно от интерфейса
-        threading.Thread(
+        print("Запись остановлена")
+        print("Началось распознавание")
+
+        # Распознавание может занимать несколько секунд.
+        # Поэтому запускаем его в отдельном потоке.
+        transcription_thread = threading.Thread(
             target=self.transcribe_audio,
             args=(audio,),
             daemon=True,
-        ).start()
+        )
+        transcription_thread.start()
 
-    def transcribe_audio(self, audio: np.ndarray) -> None:
-        """Преобразует аудио в текст."""
+    def transcribe_audio(
+        self,
+        audio: np.ndarray,
+    ) -> None:
+        """Преобразует аудиомассив в текст."""
 
         try:
+            if self.model is None:
+                raise RuntimeError(
+                    "Модель распознавания не загружена"
+                )
+
             segments, info = self.model.transcribe(
                 audio,
+
+                # Русский язык
                 language=LANGUAGE,
+
+                # Качество поиска результата
                 beam_size=5,
+
+                # Убирает участки тишины
                 vad_filter=True,
+
+                # Не связывает текущую запись
+                # с предыдущими фрагментами
                 condition_on_previous_text=False,
             )
 
-            text_parts = []
+            text_parts: list[str] = []
 
+            # faster-whisper возвращает текст частями
             for segment in segments:
                 clean_text = segment.text.strip()
 
                 if clean_text:
                     text_parts.append(clean_text)
 
+            # Соединяем сегменты через пробел
             result = " ".join(text_parts)
 
-            self.root.after(
-                0,
-                lambda: self.show_result(result),
-            )
+            print("Результат:", result)
+
+            if not self.is_closing:
+                self.root.after(
+                    0,
+                    lambda: self.show_result(result),
+                )
 
         except Exception as error:
             error_text = str(error)
 
-            self.root.after(
-                0,
-                lambda: self.show_transcription_error(error_text),
-            )
+            if not self.is_closing:
+                self.root.after(
+                    0,
+                    lambda: self.show_transcription_error(
+                        error_text
+                    ),
+                )
 
     def show_result(self, result: str) -> None:
-        """Выводит распознанный текст."""
+        """Выводит распознанный текст в интерфейс."""
 
         self.is_processing = False
 
+        # Удаляем старый текст
         self.result_text.delete(
             "1.0",
             tk.END,
         )
 
         if result:
+            # Выводим новый текст
             self.result_text.insert(
                 tk.END,
                 result,
@@ -318,12 +476,14 @@ class VoiceTyperApp:
                 text="Текст распознан",
                 fg="#72d98b",
             )
+
         else:
             self.status_label.configure(
                 text="Речь не распознана",
                 fg="#ff7777",
             )
 
+        # Снова разрешаем запись
         self.record_button.configure(
             state=tk.NORMAL,
         )
@@ -347,12 +507,17 @@ class VoiceTyperApp:
 
         messagebox.showerror(
             "Ошибка распознавания",
-            error_text,
+            (
+                "Не удалось преобразовать речь в текст.\n\n"
+                f"{error_text}"
+            ),
         )
 
     def toggle_recording(self) -> None:
-        """Переключает запись."""
+        """Запускает или останавливает запись."""
 
+        # Пока идёт распознавание,
+        # новые нажатия игнорируются
         if self.is_processing:
             return
 
@@ -362,15 +527,25 @@ class VoiceTyperApp:
             self.start_recording()
 
     def close_app(self) -> None:
-        """Закрывает микрофон и приложение."""
+        """Корректно закрывает приложение."""
 
+        self.is_closing = True
+
+        # Закрываем микрофон, если запись ещё идёт
         if self.stream is not None:
-            self.stream.stop()
-            self.stream.close()
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception:
+                pass
+
+            self.stream = None
 
         self.root.destroy()
 
     def run(self) -> None:
+        """Запускает главный цикл Tkinter."""
+
         self.root.mainloop()
 
 

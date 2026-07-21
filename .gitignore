@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 *.wav
+build/
+dist/
+*.spec
 
 recording.wav
 test_recording.wav
